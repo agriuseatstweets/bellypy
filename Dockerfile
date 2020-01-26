@@ -6,5 +6,6 @@ RUN pip install --user \
         tweepy \
         clize
 
-COPY gcs-connector-hadoop2-latest.jar .
-COPY keys/key.json ./work/
+COPY . .
+
+CMD ["python", "belly.py"]

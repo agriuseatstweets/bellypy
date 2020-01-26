@@ -1,0 +1,7 @@
+*.ipynb
+.env
+keys
+Dockerfile
+spark-warehouse
+__pycache__
+.git
