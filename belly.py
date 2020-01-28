@@ -12,7 +12,7 @@ from time import sleep
 
 
 def consume(c, max_):
-    msgs = c.consume(max_, 30.) #30s timeout
+    msgs = c.consume(max_, 300.) #300s timeout
     for msg in msgs:
         if msg.error():
             err = msg.error()
@@ -42,18 +42,21 @@ def replace_timestamps_in_dat(dat, fn):
     dat = parse_dates(dat, 'iDate', fn)
     return dat
 
-
-def _cast_doubles(a):
-    if type(a) == list:
-        return [_cast_doubles(i) for i in a]
-    if type(a) == dict:
-        return {k:_cast_doubles(v) for k,v in a.items()}
+def _safe_cast_double(a):
     try:
         return float(a)
     except ValueError:
         return a
     except TypeError:
         return a
+
+
+def _cast_doubles(a):
+    if type(a) == list:
+        return [_cast_doubles(i) for i in a]
+    if type(a) == dict:
+        return {k:_cast_doubles(v) for k,v in a.items()}
+    return _safe_cast_double(a)
 
 
 def cast_coords(tw):
@@ -69,11 +72,21 @@ def cast_coords(tw):
 
     return tw
 
-def messages_to_df(spark, schema, messages):
+def cast_originals(tw):
+    og = tw['th_original']
+    try:
+        og['lng'] = _safe_cast_double(og['lng'])
+        og['lat'] = _safe_cast_double(og['lat'])
+    except KeyError:
+        pass
+    return tw
+
+def messages_to_df(spark, schema, messages, partitions):
     tweets = [json.loads(msg.value()) for msg in messages]
     tweets = [replace_timestamps_in_dat(t, parse_datetime) for t in tweets]
     tweets = [cast_coords(tw) for tw in tweets]
-    return spark.createDataFrame(tweets, schema)
+    tweets = [cast_originals(tw) for tw in tweets]
+    return spark.createDataFrame(tweets, schema).repartition(partitions)
 
 def get_consumer():
     kafka_brokers = os.getenv('KAFKA_BROKERS') # "localhost:9092"
@@ -83,7 +96,8 @@ def get_consumer():
         'bootstrap.servers': kafka_brokers,
         'group.id': 'belly',
         'auto.offset.reset': 'earliest',
-        'enable.auto.commit': False
+        'enable.auto.commit': False,
+	"max.poll.interval.ms": "960000" # 16min
     })
 
     c.subscribe([topic])
@@ -119,9 +133,11 @@ def dedup_data(spark, d, week, year, inpath):
     d = d.join(ids, on='id', how='left_anti')
     return d
 
+# Coalesces to one -- belly should be run in small chunks
 def write_out(d, week, year, outpath):
     f = path.join(outpath, f'year={year}', f'week={week}')
     d.where(f'week = {week} and year = {year}') \
+     .coalesce(1) \
      .write \
      .mode('append') \
      .parquet(f)
@@ -150,7 +166,9 @@ def main():
 
     c = get_consumer()
     messages = consume(c, N)
-    df = messages_to_df(spark, schema, messages)
+
+    partitions = round(N/200)
+    df = messages_to_df(spark, schema, messages, partitions)
 
     indempotent_write(spark, df, warehouse_path)
 
