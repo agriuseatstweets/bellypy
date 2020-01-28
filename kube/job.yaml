@@ -14,7 +14,7 @@ spec:
           restartPolicy: OnFailure
           containers:
           - name: agrius-belly
-            image: agriuseatstweets/belly:0.0.7
+            image: agriuseatstweets/belly:0.0.9
             resources:
               requests:
                 memory: "512Mi"

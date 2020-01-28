@@ -9,7 +9,7 @@ from clize import run
 from copy import deepcopy
 from os import path
 from time import sleep
-
+import logging
 
 def consume(c, max_):
     msgs = c.consume(max_, 300.) #300s timeout
@@ -167,11 +167,13 @@ def main():
     c = get_consumer()
     messages = consume(c, N)
 
+    if len(messages) < round(N/4):
+        logging.info('Not enough messages for Belly, exiting.')
+        return
+
     partitions = round(N/200)
     df = messages_to_df(spark, schema, messages, partitions)
-
     indempotent_write(spark, df, warehouse_path)
-
     commit_messages(c, messages)
 
 
