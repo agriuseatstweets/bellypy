@@ -8,6 +8,8 @@ import json
 from clize import run
 from copy import deepcopy
 from os import path
+from time import sleep
+
 
 def consume(c, max_):
     msgs = c.consume(max_, 30.) #30s timeout
@@ -36,6 +38,8 @@ def parse_dates(obj, key, fn):
 
 def replace_timestamps_in_dat(dat, fn):
     dat = parse_dates(dat, 'created_at', fn)
+    dat = parse_dates(dat, 'created', fn)
+    dat = parse_dates(dat, 'iDate', fn)
     return dat
 
 
@@ -89,6 +93,8 @@ def get_consumer():
 
     return c
 
+
+# NOTE: change cleanup-failures.ignore to true if causing problems
 def build_spark():
     spark = SparkSession \
         .builder \
@@ -97,11 +103,17 @@ def build_spark():
         .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
         .config("spark.hadoop.google.cloud.auth.service.account.enable", "true") \
         .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile", "/home/jupyter/work/keys/key.json") \
+        .config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2") \
+        .config("spark.hadoop.mapreduce.fileoutputcommitter.cleanup-failures.ignored", "false") \
+        .config("spark.hadoop.parquet.enable.summary-metadata", "false") \
+        .config("spark.sql.parquet.mergeSchema", "false") \
+        .config("spark.sql.parquet.filterPushdown", "true") \
+        .config("spark.sql.hive.metastorePartitionPruning", "true") \
         .getOrCreate()
 
     return spark
 
-def dedup_data(d, week, year, inpath):
+def dedup_data(spark, d, week, year, inpath):
     ids = spark.read.parquet(inpath).select('id').where(f'week = {week} and year = {year}')
     d = d.where(f'week = {week} and year = {year}')
     d = d.join(ids, on='id', how='left_anti')
@@ -109,16 +121,19 @@ def dedup_data(d, week, year, inpath):
 
 def write_out(d, week, year, outpath):
     f = path.join(outpath, f'year={year}', f'week={week}')
-    d.where(f'week = {week} and year = {year}').write.mode('append').parquet(f)
+    d.where(f'week = {week} and year = {year}') \
+     .write \
+     .mode('append') \
+     .parquet(f)
 
-def indempotent_write(df, warehouse):
+def indempotent_write(spark, df, warehouse):
     df.registerTempTable('tweets')
     dd = spark.sql('select *, weekofyear(created_at) as week, month(created_at) as month, year(created_at) as year from tweets')
     dd.registerTempTable('tweets')
     combos = spark.sql('select distinct year, week from tweets').collect()
     for combo in combos:
         week,year = combo.week, combo.year
-        d = dedup_data(dd, week, year, warehouse)
+        d = dedup_data(spark, dd, week, year, warehouse)
         write_out(d, week, year, warehouse)
 
 
@@ -134,12 +149,10 @@ def main():
     N = int(os.getenv('BELLY_SIZE'))
 
     c = get_consumer()
-
-
     messages = consume(c, N)
     df = messages_to_df(spark, schema, messages)
 
-    indempotent_write(df, warehouse_path)
+    indempotent_write(spark, df, warehouse_path)
 
     commit_messages(c, messages)
 
