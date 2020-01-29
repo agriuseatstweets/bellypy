@@ -73,8 +73,8 @@ def cast_coords(tw):
     return tw
 
 def cast_originals(tw):
-    og = tw['th_original']
     try:
+        og = tw['th_original']
         og['lng'] = _safe_cast_double(og['lng'])
         og['lat'] = _safe_cast_double(og['lat'])
     except KeyError:
@@ -119,7 +119,6 @@ def build_spark():
         .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile", "/home/jupyter/work/keys/key.json") \
         .config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2") \
         .config("spark.hadoop.mapreduce.fileoutputcommitter.cleanup-failures.ignored", "false") \
-        .config("spark.hadoop.parquet.enable.summary-metadata", "false") \
         .config("spark.sql.parquet.mergeSchema", "false") \
         .config("spark.sql.parquet.filterPushdown", "true") \
         .config("spark.sql.hive.metastorePartitionPruning", "true") \
@@ -127,30 +126,31 @@ def build_spark():
 
     return spark
 
-def dedup_data(spark, d, week, year, inpath):
-    ids = spark.read.parquet(inpath).select('id').where(f'week = {week} and year = {year}')
-    d = d.where(f'week = {week} and year = {year}')
+def dedup_data(spark, d, date, inpath):
+    indf = spark.read.parquet(inpath)
+    ids = indf.where(indf.datestamp == date).select('id')
+    d = d.where(d.datestamp == date)
     d = d.join(ids, on='id', how='left_anti')
     return d
 
 # Coalesces to one -- belly should be run in small chunks
-def write_out(d, week, year, outpath):
-    f = path.join(outpath, f'year={year}', f'week={week}')
-    d.where(f'week = {week} and year = {year}') \
+def write_out(d, date, outpath):
+    f = path.join(outpath, f'datestamp={date}')
+    d.where(d.datestamp == date) \
      .coalesce(1) \
+     .drop('datestamp') \
      .write \
      .mode('append') \
      .parquet(f)
 
 def indempotent_write(spark, df, warehouse):
     df.registerTempTable('tweets')
-    dd = spark.sql('select *, weekofyear(created_at) as week, month(created_at) as month, year(created_at) as year from tweets')
+    dd = spark.sql('select *, CAST(created_at AS DATE) as datestamp from tweets')
     dd.registerTempTable('tweets')
-    combos = spark.sql('select distinct year, week from tweets').collect()
-    for combo in combos:
-        week,year = combo.week, combo.year
-        d = dedup_data(spark, dd, week, year, warehouse)
-        write_out(d, week, year, warehouse)
+    dates = spark.sql('select distinct datestamp from tweets').collect()
+    for date in [r.datestamp for r in dates]:
+        d = dedup_data(spark, dd, date, warehouse)
+        write_out(d, date, warehouse)
 
 
 def commit_messages(c, messages):
