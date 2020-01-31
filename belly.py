@@ -136,26 +136,31 @@ def build_spark():
 
     return spark
 
-def dedup_data(spark, d, dates, inpath):
-    ids = spark.read.parquet(inpath) \
-                    .where(col('datestamp').isin(dates)) \
-                    .select('id')
+def dedup_data(spark, d, date, inpath):
+    indf = spark.read.parquet(inpath)
+    ids = indf.where(indf.datestamp == date).select('id')
+    d = d.where(d.datestamp == date)
     d = d.join(ids, on='id', how='left_anti')
     return d
 
-def write_out(d, outpath):
-    d.write \
+# Coalesces to one -- belly should be run in small chunks
+def write_out(d, date, outpath):
+    f = path.join(outpath, f'datestamp={date}')
+    d.where(d.datestamp == date) \
+     .coalesce(1) \
+     .drop('datestamp') \
+     .write \
      .mode('append') \
-     .parquet(outpath, partitionBy='datestamp')
+     .parquet(f)
 
 def indempotent_write(spark, df, warehouse):
     df.registerTempTable('tweets')
-    df = spark.sql('select *, CAST(created_at AS DATE) as datestamp from tweets')
-    df.registerTempTable('tweets')
+    dd = spark.sql('select *, CAST(created_at AS DATE) as datestamp from tweets')
+    dd.registerTempTable('tweets')
     dates = spark.sql('select distinct datestamp from tweets').collect()
-    dates = [r.datestamp for r in dates]
-    df = dedup_data(spark, df, dates, warehouse)
-    write_out(df, warehouse)
+    for date in [r.datestamp for r in dates]:
+        d = dedup_data(spark, dd, date, warehouse)
+        write_out(d, date, warehouse)
 
 
 def commit_messages(c, messages):
