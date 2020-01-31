@@ -9,7 +9,6 @@ from clize import run
 from copy import deepcopy
 from os import path
 from time import sleep
-import logging
 from math import ceil
 from pyspark.sql.functions import col
 
@@ -132,9 +131,12 @@ def build_spark():
         .config("spark.driver.memory", driver_memory) \
         .getOrCreate()
 
-    spark.sparkContext.setLogLevel("INFO")
+    sc = spark.sparkContext
+    sc.setLogLevel(os.getenv("SPARK_LOG_LEVEL", "INFO"))
+    log4jLogger = sc._jvm.org.apache.log4j
+    log = log4jLogger.LogManager.getLogger(__name__)
 
-    return spark
+    return spark, log
 
 def dedup_data(spark, d, date, inpath):
     indf = spark.read.parquet(inpath)
@@ -163,12 +165,11 @@ def indempotent_write(spark, df, warehouse):
         write_out(d, date, warehouse)
 
 
-def commit_messages(c, messages):
-    for m in messages:
-        c.commit(m, asynchronous=True)
+def commit_messages(c, offsets):
+    c.commit(offsets = offsets, asynchronous = False)
 
 def main():
-    spark = build_spark()
+    spark,log = build_spark()
 
     schema = read_schema('gs://spain-tweets/schemas/tweet-clean.pickle')
 
@@ -177,19 +178,22 @@ def main():
     partition_size = int(os.getenv('PARTITION_SIZE', '10000'))
 
     c = get_consumer()
-    logging.info(f'Belly consumer subscribed to: {c.assignment()}')
     messages = consume(c, N)
-    print(f'BELLY CONSUMED {len(messages)} MESSAGES FROM QUEUE.')
+    offsets = c.position(c.assignment())
+
+    log.warn(f'BELLY CONSUMED {len(messages)} MESSAGES FROM QUEUE.')
+    log.warn(f'Belly consumer subscribed to: {c.assignment()}')
 
     if len(messages) < round(N/4):
-        logging.info('Not enough messages for Belly, exiting.')
+        log.warn('Not enough messages for Belly, exiting.')
         return
 
     partitions = ceil(N/partition_size)
     df = messages_to_df(spark, schema, messages, partitions)
     indempotent_write(spark, df, warehouse_path)
-    commit_messages(c, messages)
-    logging.info(f'Belly wrote {len(messages)} to warehouse.')
+    commit_messages(c, offsets)
+
+    log.warn(f'Belly wrote {len(messages)} to warehouse.')
 
 if __name__ == '__main__':
     run(main)
