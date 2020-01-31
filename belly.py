@@ -11,14 +11,8 @@ from os import path
 from time import sleep
 from math import ceil
 from pyspark.sql.functions import col
+from confluent_kafka import TopicPartition
 
-def consume(c, max_):
-    msgs = c.consume(max_, 300.) #300s timeout
-    for msg in msgs:
-        if msg.error():
-            err = msg.error()
-            raise err
-    return msgs
 
 def read_schema(path):
     fs = GCSFileSystem(project='trollhunters')
@@ -106,7 +100,7 @@ def get_consumer():
     c.subscribe([topic])
 
     # Sleep a bit to wait for other consumers to join
-    sleep(5)
+    sleep(10)
 
     return c
 
@@ -139,10 +133,10 @@ def build_spark():
     return spark, log
 
 def dedup_data(spark, d, date, inpath):
-    indf = spark.read.parquet(inpath)
-    ids = indf.where(indf.datestamp == date).select('id')
-    d = d.where(d.datestamp == date)
-    d = d.join(ids, on='id', how='left_anti')
+    # indf = spark.read.parquet(inpath)
+    # ids = indf.where(indf.datestamp == date).select('id')
+    # d = d.where(d.datestamp == date)
+    # d = d.join(ids, on='id', how='left_anti')
     return d
 
 # Coalesces to one -- belly should be run in small chunks
@@ -164,25 +158,42 @@ def indempotent_write(spark, df, warehouse):
         d = dedup_data(spark, dd, date, warehouse)
         write_out(d, date, warehouse)
 
+def start_consuming(N, log):
+    c = get_consumer()
+
+    # ASSIGN ONLY ONE PARTITION
+    msg = c.poll()
+    c.assign([TopicPartition(msg.topic(), msg.partition())])
+
+    msgs = [msg]
+    msgs += c.consume(N, 300.) #300s timeout
+    for msg in msgs:
+        if msg.error():
+            err = msg.error()
+            raise err
+
+    log.warn(f'Belly consumer subscribed to: {c.assignment()}')
+
+    # TODO: OFFSET SHOULD REALLY BE POSITION + 1!!!
+    offsets = c.position(c.assignment())
+    return msgs, lambda: commit_messages(c, offsets)
+
 
 def commit_messages(c, offsets):
     c.commit(offsets = offsets, asynchronous = False)
 
 def main():
-    spark,log = build_spark()
+    spark, log = build_spark()
 
     schema = read_schema('gs://spain-tweets/schemas/tweet-clean.pickle')
 
     warehouse_path = os.getenv('BELLY_LOCATION')
     N = int(os.getenv('BELLY_SIZE'))
-    partition_size = int(os.getenv('PARTITION_SIZE', '10000'))
+    partition_size = int(os.getenv('PARTI TION_SIZE', '10000'))
 
-    c = get_consumer()
-    messages = consume(c, N)
-    offsets = c.position(c.assignment())
+    messages, commit = start_consuming(N, log)
 
     log.warn(f'BELLY CONSUMED {len(messages)} MESSAGES FROM QUEUE.')
-    log.warn(f'Belly consumer subscribed to: {c.assignment()}')
 
     if len(messages) < round(N/4):
         log.warn('Not enough messages for Belly, exiting.')
@@ -191,7 +202,7 @@ def main():
     partitions = ceil(N/partition_size)
     df = messages_to_df(spark, schema, messages, partitions)
     indempotent_write(spark, df, warehouse_path)
-    commit_messages(c, offsets)
+    commit()
 
     log.warn(f'Belly wrote {len(messages)} to warehouse.')
 

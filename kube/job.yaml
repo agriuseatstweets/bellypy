@@ -3,7 +3,7 @@ kind: CronJob
 metadata:
   name: agrius-belly
 spec:
-  schedule: "*/10 * * * *"
+  schedule: "*/30 * * * *"
   jobTemplate:
     spec:
       completions: 1
@@ -14,22 +14,22 @@ spec:
           restartPolicy: OnFailure
           containers:
           - name: agrius-belly
-            image: agriuseatstweets/belly:0.0.19
+            image: agriuseatstweets/belly:0.0.21
             resources:
               requests:
-                cpu: "1.5"
-                memory: "10Gi"
+                cpu: "2"
+                memory: "40Gi"
             env:
               - name: GOOGLE_APPLICATION_CREDENTIALS
                 value: "/home/jupyter/work/keys/key.json"
               - name: BELLY_LOCATION
                 value: "gs://spain-tweets/datalake"
               - name: BELLY_SIZE
-                value: "180000"
+                value: "360000"
               - name: PARTITION_SIZE
                 value: "20000"
               - name: SPARK_DRIVER_MEMORY
-                value: "10g"
+                value: "40g"
               - name: BELLY_TOPIC
                 value: "tweets"
               - name: KAFKA_BROKERS
