@@ -1,5 +1,5 @@
 from copy import deepcopy
-from pyspark.sql.types import StructField, StructType, ArrayType
+from pyspark.sql.types import StructField, StructType, ArrayType, TimestampType
 from belly import read_schema
 
 def replace_with_type(schema, target, NewType):
@@ -26,15 +26,14 @@ def replace_with_type(schema, target, NewType):
 def get_field(struct, name):
     return [f.dataType for f in struct.fields if f.name == name][0]
 
-def set_field(struct, name, value):
+def set_field(struct, name, value, nullable=True):
     new_struct = StructType()
     for f in struct:
         if f.name != name:
             new_struct.add(f)
 
-    struct.add(name, data_type = deepcopy(value))
-    return struct
-
+    new_struct.add(name, data_type = deepcopy(value), nullable=nullable)
+    return new_struct
 
 def filter_fields(struct, fields):
     new_struct = StructType()
@@ -42,6 +41,7 @@ def filter_fields(struct, fields):
         if f.name not in fields:
             new_struct.add(f)
     return new_struct
+
 
 def create_schema():
     # random original schema inferred from a bunch of tweets
@@ -54,6 +54,11 @@ def create_schema():
 
     s = filter_fields(s, ['th_original', 'th_rehydrated'])
     s = filter_fields(s, ['retweeted_status', 'quoted_status'])
+
+    # Make not nullable:
+    not_nullable = ['id', 'created_at']
+    for field in not_nullable:
+        s = set_field(s, field, get_field(s, field), False)
 
     s = set_field(s, 'quoted_status', s)
     s = set_field(s, 'retweeted_status', s)
