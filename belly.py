@@ -10,6 +10,8 @@ from copy import deepcopy
 from os import path
 from time import sleep
 import logging
+from math import ceil
+from pyspark.sql.functions import col
 
 def consume(c, max_):
     msgs = c.consume(max_, 300.) #300s timeout
@@ -86,18 +88,20 @@ def messages_to_df(spark, schema, messages, partitions):
     tweets = [replace_timestamps_in_dat(t, parse_datetime) for t in tweets]
     tweets = [cast_coords(tw) for tw in tweets]
     tweets = [cast_originals(tw) for tw in tweets]
-    return spark.createDataFrame(tweets, schema).repartition(partitions)
+    tweets = spark.sparkContext.parallelize(tweets, partitions)
+    return spark.createDataFrame(tweets, schema)
 
 def get_consumer():
     kafka_brokers = os.getenv('KAFKA_BROKERS') # "localhost:9092"
     topic = os.getenv('BELLY_TOPIC') # tweets
+    poll_interval = os.getenv('KAFKA_CONSUMER_POLL_INTERVAL', '1920000') # 32min
 
     c = Consumer({
         'bootstrap.servers': kafka_brokers,
         'group.id': 'belly',
         'auto.offset.reset': 'earliest',
         'enable.auto.commit': False,
-	"max.poll.interval.ms": "960000" # 16min
+	"max.poll.interval.ms": poll_interval
     })
 
     c.subscribe([topic])
@@ -110,8 +114,11 @@ def get_consumer():
 
 # NOTE: change cleanup-failures.ignore to true if causing problems
 def build_spark():
+    driver_memory = os.getenv("SPARK_DRIVER_MEMORY", "4g")
+
     spark = SparkSession \
         .builder \
+        .master('local[2]') \
         .appName('belly') \
         .config("spark.jars", "/home/jupyter/work/gcs-connector-hadoop2-latest.jar") \
         .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
@@ -122,35 +129,33 @@ def build_spark():
         .config("spark.sql.parquet.mergeSchema", "false") \
         .config("spark.sql.parquet.filterPushdown", "true") \
         .config("spark.sql.hive.metastorePartitionPruning", "true") \
+        .config("spark.driver.memory", driver_memory) \
         .getOrCreate()
+
+    spark.sparkContext.setLogLevel("INFO")
 
     return spark
 
-def dedup_data(spark, d, date, inpath):
-    indf = spark.read.parquet(inpath)
-    ids = indf.where(indf.datestamp == date).select('id')
-    d = d.where(d.datestamp == date)
+def dedup_data(spark, d, dates, inpath):
+    ids = spark.read.parquet(inpath) \
+                    .where(col('datestamp').isin(dates)) \
+                    .select('id')
     d = d.join(ids, on='id', how='left_anti')
     return d
 
-# Coalesces to one -- belly should be run in small chunks
-def write_out(d, date, outpath):
-    f = path.join(outpath, f'datestamp={date}')
-    d.where(d.datestamp == date) \
-     .coalesce(1) \
-     .drop('datestamp') \
-     .write \
+def write_out(d, outpath):
+    d.write \
      .mode('append') \
-     .parquet(f)
+     .parquet(outpath, partitionBy='datestamp')
 
 def indempotent_write(spark, df, warehouse):
     df.registerTempTable('tweets')
-    dd = spark.sql('select *, CAST(created_at AS DATE) as datestamp from tweets')
-    dd.registerTempTable('tweets')
+    df = spark.sql('select *, CAST(created_at AS DATE) as datestamp from tweets')
+    df.registerTempTable('tweets')
     dates = spark.sql('select distinct datestamp from tweets').collect()
-    for date in [r.datestamp for r in dates]:
-        d = dedup_data(spark, dd, date, warehouse)
-        write_out(d, date, warehouse)
+    dates = [r.datestamp for r in dates]
+    df = dedup_data(spark, df, dates, warehouse)
+    write_out(df, warehouse)
 
 
 def commit_messages(c, messages):
@@ -159,23 +164,27 @@ def commit_messages(c, messages):
 
 def main():
     spark = build_spark()
+
     schema = read_schema('gs://spain-tweets/schemas/tweet-clean.pickle')
 
     warehouse_path = os.getenv('BELLY_LOCATION')
     N = int(os.getenv('BELLY_SIZE'))
+    partition_size = int(os.getenv('PARTITION_SIZE', '10000'))
 
     c = get_consumer()
+    logging.info(f'Belly consumer subscribed to: {c.assignment()}')
     messages = consume(c, N)
+    print(f'BELLY CONSUMED {len(messages)} MESSAGES FROM QUEUE.')
 
     if len(messages) < round(N/4):
         logging.info('Not enough messages for Belly, exiting.')
         return
 
-    partitions = round(N/200)
+    partitions = ceil(N/partition_size)
     df = messages_to_df(spark, schema, messages, partitions)
     indempotent_write(spark, df, warehouse_path)
     commit_messages(c, messages)
-
+    logging.info(f'Belly wrote {len(messages)} to warehouse.')
 
 if __name__ == '__main__':
     run(main)
