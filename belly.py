@@ -87,7 +87,7 @@ def messages_to_df(spark, schema, messages, partitions):
 def get_consumer():
     kafka_brokers = os.getenv('KAFKA_BROKERS') # "localhost:9092"
     topic = os.getenv('BELLY_TOPIC') # tweets
-    poll_interval = os.getenv('KAFKA_CONSUMER_POLL_INTERVAL', '1920000') # 32min
+    poll_interval = os.getenv('KAFKA_POLL_INTERVAL', '1920000') # 32min
 
     c = Consumer({
         'bootstrap.servers': kafka_brokers,
