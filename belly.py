@@ -99,9 +99,6 @@ def get_consumer():
 
     c.subscribe([topic])
 
-    # Sleep a bit to wait for other consumers to join
-    sleep(10)
-
     return c
 
 
