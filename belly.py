@@ -157,9 +157,13 @@ def indempotent_write(spark, df, warehouse):
 
 def start_consuming(N, log):
     c = get_consumer()
+    msg = c.poll(60.)
+
+    # This should stop the process
+    if not msg:
+        return [], None
 
     # ASSIGN ONLY ONE PARTITION
-    msg = c.poll()
     c.assign([TopicPartition(msg.topic(), msg.partition())])
 
     msgs = [msg]
