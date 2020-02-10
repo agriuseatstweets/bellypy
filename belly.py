@@ -157,7 +157,7 @@ def indempotent_write(spark, df, warehouse):
 
 def start_consuming(N, log):
     c = get_consumer()
-    msg = c.poll(60.)
+    msg = c.poll(300.)
 
     # This should stop the process
     if not msg:
