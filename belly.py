@@ -130,10 +130,10 @@ def build_spark():
     return spark, log
 
 def dedup_data(spark, d, date, inpath):
-    # indf = spark.read.parquet(inpath)
-    # ids = indf.where(indf.datestamp == date).select('id')
-    # d = d.where(d.datestamp == date)
-    # d = d.join(ids, on='id', how='left_anti')
+    indf = spark.read.parquet(inpath)
+    ids = indf.where(indf.datestamp == date).select('id')
+    d = d.where(d.datestamp == date)
+    d = d.join(ids, on='id', how='left_anti')
     return d
 
 # Coalesces to one -- belly should be run in small chunks
@@ -146,14 +146,16 @@ def write_out(d, date, outpath):
      .mode('append') \
      .parquet(f)
 
-def indempotent_write(spark, df, warehouse):
+def indempotent_write(spark, df, warehouse, log):
     df.registerTempTable('tweets')
     dd = spark.sql('select *, CAST(created_at AS DATE) as datestamp from tweets')
     dd.registerTempTable('tweets')
     dates = spark.sql('select distinct datestamp from tweets').collect()
     for date in [r.datestamp for r in dates]:
         d = dedup_data(spark, dd, date, warehouse)
+        d.cache()
         write_out(d, date, warehouse)
+        log.warn(f'BELLY WROTE {d.count()} MESSAGES FROM DATE: {date}')
 
 def start_consuming(N, log):
     c = get_consumer()
@@ -190,22 +192,24 @@ def main():
 
     warehouse_path = os.getenv('BELLY_LOCATION')
     N = int(os.getenv('BELLY_SIZE'))
+    min_N = int(os.getenv('BELLY_MINIMUM_SIZE', N/4))
+
     partition_size = int(os.getenv('PARTI TION_SIZE', '10000'))
 
     messages, commit = start_consuming(N, log)
 
     log.warn(f'BELLY CONSUMED {len(messages)} MESSAGES FROM QUEUE.')
 
-    if len(messages) < round(N/4):
+    if len(messages) < min_N:
         log.warn('Not enough messages for Belly, exiting.')
         return
 
     partitions = ceil(N/partition_size)
     df = messages_to_df(spark, schema, messages, partitions)
-    indempotent_write(spark, df, warehouse_path)
+    indempotent_write(spark, df, warehouse_path, log)
     commit()
 
-    log.warn(f'Belly wrote {len(messages)} to warehouse.')
+    log.warn(f'Belly finished consuming {len(messages)} and writing to warehouse.')
 
 if __name__ == '__main__':
     run(main)
